@@ -1,0 +1,6 @@
+-Dauto_features=disabled
+-Dalsa=enabled
+-Dpulse=enabled
+-Dgl=disabled
+-Dlibmpv=false
+-Dbuild-date=false

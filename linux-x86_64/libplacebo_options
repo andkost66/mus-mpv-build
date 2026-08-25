@@ -1,0 +1,4 @@
+-Dauto_features=disabled
+-Dopengl=disabled
+-Dvulkan=disabled
+-Dd3d11=disabled

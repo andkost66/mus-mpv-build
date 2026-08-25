@@ -1,0 +1,2 @@
+--disable-fontconfig
+--disable-require-system-font-provider
