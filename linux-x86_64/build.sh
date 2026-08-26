@@ -96,6 +96,18 @@ prepare_sources() {
         "$BUILD_DIR/mpv" \
         "$MPV_REVISION"
 
+    git -C "$BUILD_DIR/libplacebo" \
+        submodule update \
+        --init \
+        --recursive \
+        --checkout
+
+    if [ -n "$(git -C "$BUILD_DIR/libplacebo" status --porcelain)" ]; then
+        echo "libplacebo source tree is not clean after source preparation" >&2
+        git -C "$BUILD_DIR/libplacebo" status --short >&2
+        return 1
+    fi
+
     cp "$TARGET_DIR/ffmpeg_options" \
         "$BUILD_DIR/ffmpeg_options"
 
@@ -525,7 +537,6 @@ main() {
     prepare_sources
     build_runtime
     assemble_dist
-
     verify_runtime
     verify_ffmpeg_contract
     verify_media

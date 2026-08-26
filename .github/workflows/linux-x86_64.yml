@@ -1,6 +1,14 @@
 name: Linux x86_64 mpv
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "linux-x86_64/**"
+      - "fixtures/**"
+      - ".github/workflows/linux-x86_64.yml"
+
   workflow_dispatch:
 
 permissions:
