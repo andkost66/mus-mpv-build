@@ -41,8 +41,8 @@ jobs:
               --file - \
               bin lib |
               zstd \
-                  --threads=0 \
-                  --output "$archive"
+                  -T0 \
+                  -o "$archive"
 
           sha256sum "$archive" > "${archive}.sha256"
 
