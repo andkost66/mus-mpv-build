@@ -11,11 +11,9 @@
 
 This may be useful for developers who need a small, portable mpv build for headless audio playback without relying on a system-installed mpv.
 
-Built on Debian 11 with glibc 2.31.
-
 Tested on:
 - Debian 11.
 - Ubuntu 20.04.
 - Ubuntu 22.04.
 
-The current mpv binary requires no newer than GLIBC 2.29.
+Requires glibc 2.31 or newer (works out of the box on Debian 11+, Ubuntu 20.04+).
