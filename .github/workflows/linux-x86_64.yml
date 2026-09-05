@@ -1,4 +1,4 @@
-name: Linux x86_64 mpv
+name: Linux target-specific mpv
 
 on:
   push:
@@ -16,14 +16,122 @@ permissions:
 
 jobs:
   build:
+    name: Build — ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - system: debian10
+            target: debian10-amd64
+            arch: amd64
+            platform: linux/amd64
+
+          - system: debian11
+            target: debian11-amd64
+            arch: amd64
+            platform: linux/amd64
+
+          - system: debian12
+            arch: arm64
+            target: debian12-arm64
+            platform: linux/arm64
+
+          - system: debian12
+            arch: armv7
+            platform: linux/arm/v7
+            target: debian12-armv7
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Build and test
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64' || matrix.arch == 'armv7'
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64,arm
+
+      - name: Real Build — Debian 10 amd64
+        if: matrix.target == 'debian10-amd64'
+        env:
+          BUILDER_IMAGE: mus-mpv-builder:debian10
+          BUILDER_DOCKERFILE: ${{ github.workspace }}/linux-x86_64/Dockerfile.debian10
         run: ./linux-x86_64/build.sh
+
+      - name: Real Build — Debian 11 amd64
+        if: matrix.target == 'debian11-amd64'
+        run: ./linux-x86_64/build.sh
+
+      - name: Real Build — Debian 12 ARM64
+        if: matrix.target == 'debian12-arm64'
+        env:
+          BUILDER_IMAGE: mus-mpv-builder:debian12-arm64
+          BUILDER_DOCKERFILE: ${{ github.workspace }}/linux-x86_64/Dockerfile.debian12
+          BUILDER_PLATFORM: linux/arm64
+        run: ./linux-x86_64/build.sh
+
+      - name: Real Build — Debian 12 ARMv7
+        if: matrix.target == 'debian12-armv7'
+        env:
+          BUILDER_IMAGE: mus-mpv-builder:debian12-armv7
+          BUILDER_DOCKERFILE: ${{ github.workspace }}/linux-x86_64/Dockerfile.debian12
+          BUILDER_PLATFORM: linux/arm/v7
+        run: ./linux-x86_64/build.sh
+
+      - name: Bundle yt-dlp — amd64 targets
+        if: matrix.target == 'debian10-amd64' || matrix.target == 'debian11-amd64'
+        run: |
+          curl -fL \
+            https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux \
+            -o dist/bin/yt-dlp
+
+          echo "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a  dist/bin/yt-dlp" |
+            sha256sum -c -
+
+          chmod +x dist/bin/yt-dlp
+
+      - name: Bundle yt-dlp — ARM64
+        if: matrix.target == 'debian12-arm64'
+        run: |
+          curl -fL \
+            https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux_aarch64 \
+            -o dist/bin/yt-dlp
+
+          echo "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc  dist/bin/yt-dlp" |
+            sha256sum -c -
+
+          chmod +x dist/bin/yt-dlp
+
+      - name: Bundle yt-dlp — ARMv7
+        if: matrix.target == 'debian12-armv7'
+        run: |
+          curl -fL \
+            https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux_armv7l.zip \
+            -o /tmp/yt-dlp_linux_armv7l.zip
+
+          echo "bd51eb5fed7788008f4f30d281a182376a1297910b6c78e747403e757a546508  /tmp/yt-dlp_linux_armv7l.zip" |
+            sha256sum -c -
+
+          rm -rf /tmp/yt-dlp-armv7
+          mkdir -p /tmp/yt-dlp-armv7
+
+          python3 -m zipfile -e \
+            /tmp/yt-dlp_linux_armv7l.zip \
+            /tmp/yt-dlp-armv7
+
+          cp -a /tmp/yt-dlp-armv7/_internal dist/bin/
+
+          install -m 0755 \
+            /tmp/yt-dlp-armv7/yt-dlp_linux_armv7l \
+            dist/bin/yt-dlp
+
+      - name: Write target metadata
+        run: |
+          echo "target=${{ matrix.target }}" > dist/target.txt
+          echo "system=${{ matrix.system }}" >> dist/target.txt
+          echo "arch=${{ matrix.arch }}" >> dist/target.txt
+          echo "platform=${{ matrix.platform }}" >> dist/target.txt
 
       - name: Install packaging tools
         run: |
@@ -40,14 +148,14 @@ jobs:
 
           short_sha="${GITHUB_SHA:0:12}"
 
-          archive="mpv-${MPV_VERSION}-linux-x86_64-rev.${short_sha}.tar.zst"
+          archive="mpv-${MPV_VERSION}-${{ matrix.target }}-rev.${short_sha}.tar.zst"
           tag="mpv-${MPV_VERSION}-rev.${short_sha}"
 
           tar \
               --directory dist \
               --create \
               --file - \
-              bin lib |
+              bin lib target.txt |
               zstd \
                   -T0 \
                   -o "$archive"
@@ -61,32 +169,183 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.package.outputs.archive }}
+          name: mpv-${{ matrix.target }}
           path: |
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.archive }}.sha256
 
+  test:
+    name: Test — ${{ matrix.target }}
+    needs: build
+
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - system: debian10
+            target: debian10-amd64
+            arch: amd64
+            platform: linux/amd64
+            expected_machine: x86_64
+            expected_os_version: "10"
+            test_image: debian:10
+
+          - system: debian11
+            target: debian11-amd64
+            arch: amd64
+            platform: linux/amd64
+            expected_machine: x86_64
+            expected_os_version: "11"
+            test_image: debian:11
+
+          - system: debian12
+            arch: arm64
+            target: debian12-arm64
+            platform: linux/arm64
+            expected_machine: aarch64
+            expected_os_version: "12"
+            test_image: debian:12
+
+          - system: debian12
+            arch: armv7
+            platform: linux/arm/v7
+            target: debian12-armv7
+            expected_machine: armv7l
+            expected_os_version: "12"
+            test_image: debian:12
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64,arm
+
+      - name: Check target environment
+        run: |
+          actual_machine=$(docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            "${{ matrix.test_image }}" \
+            uname -m)
+
+          actual_os_version=$(docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            "${{ matrix.test_image }}" \
+            sh -c '. /etc/os-release && echo "$VERSION_ID"')
+
+          echo "Expected machine:    ${{ matrix.expected_machine }}"
+          echo "Actual machine:      $actual_machine"
+          echo "Expected OS version: ${{ matrix.expected_os_version }}"
+          echo "Actual OS version:   $actual_os_version"
+
+          test "$actual_machine" = "${{ matrix.expected_machine }}"
+          test "$actual_os_version" = "${{ matrix.expected_os_version }}"
+
+      - name: Download workflow artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: mpv-${{ matrix.target }}
+
+      - name: Verify artifact in matching target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -v "$PWD:/work:ro" \
+            "${{ matrix.test_image }}" \
+            bash -c '
+              set -euo pipefail
+
+              if [ "${{ matrix.system }}" = "debian10" ]; then
+                sed -i "s|deb.debian.org/debian-security|archive.debian.org/debian-security|g" /etc/apt/sources.list
+                sed -i "s|deb.debian.org/debian|archive.debian.org/debian|g" /etc/apt/sources.list
+                sed -i "/buster-updates/d" /etc/apt/sources.list
+                apt-get -o Acquire::Check-Valid-Until=false update
+              else
+                apt-get update
+              fi
+
+              apt-get install --yes zstd
+
+              cd /work
+
+              archive=$(find . -maxdepth 1 -name "mpv-*-${{ matrix.target }}-rev.*.tar.zst" -print -quit)
+
+              sha256sum -c "${archive}.sha256"
+
+              mkdir -p /tmp/artifact
+              tar --zstd -xf "$archive" -C /tmp/artifact
+              cd /tmp/artifact
+
+              if [ "${{ matrix.target }}" = "debian10-amd64" ] || \
+                 [ "${{ matrix.target }}" = "debian11-amd64" ] || \
+                 [ "${{ matrix.target }}" = "debian12-arm64" ] || \
+                 [ "${{ matrix.target }}" = "debian12-armv7" ]; then
+                LD_LIBRARY_PATH="$PWD/lib" \
+                  ./bin/mpv --no-config --version
+
+                ./bin/yt-dlp --version
+              fi
+
+              cat target.txt
+
+              grep -Fx "target=${{ matrix.target }}" target.txt
+              grep -Fx "system=${{ matrix.system }}" target.txt
+              grep -Fx "arch=${{ matrix.arch }}" target.txt
+            '
+
+  publish:
+    name: Publish target release
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download target artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mpv-*
+          merge-multiple: true
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-          TAG: ${{ steps.package.outputs.tag }}
-          SHORT_SHA: ${{ steps.package.outputs.short_sha }}
         shell: bash
         run: |
           set -euo pipefail
 
           source linux-x86_64/source.env
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "release already exists: $TAG" >&2
+          short_sha="${GITHUB_SHA:0:12}"
+          tag="mpv-${MPV_VERSION}-rev.${short_sha}"
+
+          shopt -s nullglob
+          archives=(mpv-${MPV_VERSION}-*-*-rev.${short_sha}.tar.zst)
+
+          if [ "${#archives[@]}" -ne 4 ]; then
+              echo "Expected 4 target archives, found ${#archives[@]}" >&2
+              exit 1
+          fi
+
+          release_files=()
+
+          for archive in "${archives[@]}"; do
+              release_files+=("$archive" "${archive}.sha256")
+          done
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+              echo "release already exists: $tag" >&2
               exit 1
           fi
 
           gh release create \
-              "$TAG" \
-              "$ARCHIVE" \
-              "${ARCHIVE}.sha256" \
+              "$tag" \
+              "${release_files[@]}" \
               --target "$GITHUB_SHA" \
-              --title "mpv ${MPV_VERSION} linux-x86_64 rev.${SHORT_SHA}" \
-              --notes "mus mpv build revision ${GITHUB_SHA}"
+              --title "mpv ${MPV_VERSION} target builds rev.${short_sha}" \
+              --notes "mus mpv target-specific build revision ${GITHUB_SHA}"
