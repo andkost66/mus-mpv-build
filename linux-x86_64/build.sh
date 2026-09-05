@@ -8,7 +8,14 @@ REPO_ROOT="$(cd "$TARGET_DIR/.." && pwd)"
 DIST_DIR="$REPO_ROOT/dist"
 FIXTURES_DIR="$REPO_ROOT/fixtures"
 
-BUILDER_IMAGE="mus-mpv-builder:glibc-2.31"
+BUILDER_IMAGE="${BUILDER_IMAGE:-mus-mpv-builder:glibc-2.31}"
+BUILDER_DOCKERFILE="${BUILDER_DOCKERFILE:-$TARGET_DIR/Dockerfile}"
+BUILDER_PLATFORM="${BUILDER_PLATFORM:-}"
+DOCKER_PLATFORM_ARGS=()
+
+if [ -n "$BUILDER_PLATFORM" ]; then
+    DOCKER_PLATFORM_ARGS=(--platform "$BUILDER_PLATFORM")
+fi
 
 source "$TARGET_DIR/source.env"
 
@@ -123,10 +130,13 @@ prepare_sources() {
 
 build_runtime() {
     docker build \
+        "${DOCKER_PLATFORM_ARGS[@]}" \
+        --file "$BUILDER_DOCKERFILE" \
         --tag "$BUILDER_IMAGE" \
         "$TARGET_DIR"
 
     docker run --rm \
+        "${DOCKER_PLATFORM_ARGS[@]}" \
         --user "$(id -u):$(id -g)" \
         -e HOME=/tmp \
         -v "$BUILD_DIR:/work" \
@@ -147,6 +157,7 @@ assemble_dist() {
         "$DIST_DIR/bin/mpv"
 
     docker run --rm \
+        "${DOCKER_PLATFORM_ARGS[@]}" \
         --user "$(id -u):$(id -g)" \
         -e HOME=/tmp \
         -v "$BUILD_DIR:/work:ro" \
@@ -537,12 +548,19 @@ main() {
     prepare_sources
     build_runtime
     assemble_dist
-    verify_runtime
     verify_ffmpeg_contract
-    verify_media
-    verify_portability
-    verify_https
-    verify_ipc
+
+    if [ -z "$BUILDER_PLATFORM" ]; then
+        verify_runtime
+        verify_media
+        verify_portability
+        verify_https
+        verify_ipc
+    else
+        printf \
+            'Skipping host runtime checks for cross-platform build: %s\n' \
+            "$BUILDER_PLATFORM"
+    fi
 
     printf '\nLinux x86_64 mpv runtime build passed.\n'
     printf 'dist: %s\n' "$DIST_DIR"

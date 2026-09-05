@@ -1,0 +1,57 @@
+FROM debian:10
+ENV DEBIAN_FRONTEND=noninteractive
+RUN sed -i "s|deb.debian.org/debian-security|archive.debian.org/debian-security|g; s|deb.debian.org/debian|archive.debian.org/debian|g; /buster-updates/d" /etc/apt/sources.list
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        ca-certificates \
+        wget \
+        xz-utils \
+        zlib1g-dev \
+        libbz2-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libffi-dev \
+        liblzma-dev \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ninja-build \
+        pkg-config \
+        cmake \
+        autoconf \
+        automake \
+        libtool \
+        nasm \
+        libfreetype6-dev \
+        libfribidi-dev \
+        libharfbuzz-dev \
+        libgnutls28-dev \
+        libasound2-dev \
+        libpulse-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wget -q https://www.nasm.us/pub/nasm/releasebuilds/2.15.05/nasm-2.15.05.tar.xz \
+    && tar -xf nasm-2.15.05.tar.xz \
+    && cd nasm-2.15.05 \
+    && ./configure --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd / \
+    && rm -rf nasm-2.15.05 nasm-2.15.05.tar.xz
+
+RUN wget -q https://www.python.org/ftp/python/3.8.20/Python-3.8.20.tar.xz \
+    && tar -xf Python-3.8.20.tar.xz \
+    && cd Python-3.8.20 \
+    && ./configure \
+        --prefix=/opt/python3.8 \
+        --with-ensurepip=install \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd / \
+    && rm -rf Python-3.8.20 Python-3.8.20.tar.xz
+
+RUN /opt/python3.8/bin/python3.8 -m pip install --no-cache-dir meson==1.11.2 && ln -sf /opt/python3.8/bin/meson /usr/local/bin/meson
