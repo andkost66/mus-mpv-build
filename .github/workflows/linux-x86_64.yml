@@ -1,92 +1,56 @@
 name: Linux x86_64 mpv
 
 on:
+  pull_request:
+    paths:
+      - "build-config/**"
+      - "builders/debian-11.Dockerfile"
+      - "targets/linux-x86_64/**"
+      - "scripts/**"
+      - "fixtures/**"
+      - ".github/workflows/linux-x86_64.yml"
+
   push:
     branches:
       - main
     paths:
-      - "linux-x86_64/**"
+      - "build-config/**"
+      - "builders/debian-11.Dockerfile"
+      - "targets/linux-x86_64/**"
+      - "scripts/**"
       - "fixtures/**"
       - ".github/workflows/linux-x86_64.yml"
 
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  build-package-verify:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Build and test
-        run: ./linux-x86_64/build.sh
-
-      - name: Install packaging tools
+      - name: Install runner dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes zstd
+          sudo apt-get install --yes --no-install-recommends binutils openssl python3 zstd
 
-      - name: Package
-        id: package
+      - name: Provision portability images
         shell: bash
         run: |
           set -euo pipefail
 
-          source linux-x86_64/source.env
+          unset PORTABILITY_IMAGES DOCKER_PLATFORM
+          source targets/linux-x86_64/target.env
 
-          short_sha="${GITHUB_SHA:0:12}"
+          IFS=$' \t\n' read -r -a portability_images <<< "${PORTABILITY_IMAGES//$'\n'/ }"
+          for image in "${portability_images[@]}"; do
+              docker pull --platform "$DOCKER_PLATFORM" "$image"
+          done
 
-          archive="mpv-${MPV_VERSION}-linux-x86_64-rev.${short_sha}.tar.zst"
-          tag="mpv-${MPV_VERSION}-rev.${short_sha}"
-
-          tar \
-              --directory dist \
-              --create \
-              --file - \
-              bin lib |
-              zstd \
-                  -T0 \
-                  -o "$archive"
-
-          sha256sum "$archive" > "${archive}.sha256"
-
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.package.outputs.archive }}
-          path: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.archive }}.sha256
-
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-          TAG: ${{ steps.package.outputs.tag }}
-          SHORT_SHA: ${{ steps.package.outputs.short_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          source linux-x86_64/source.env
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "release already exists: $TAG" >&2
-              exit 1
-          fi
-
-          gh release create \
-              "$TAG" \
-              "$ARCHIVE" \
-              "${ARCHIVE}.sha256" \
-              --target "$GITHUB_SHA" \
-              --title "mpv ${MPV_VERSION} linux-x86_64 rev.${SHORT_SHA}" \
-              --notes "mus mpv build revision ${GITHUB_SHA}"
+      - name: Build, package and verify linux-x86_64
+        run: ./scripts/build-package-verify.sh linux-x86_64
