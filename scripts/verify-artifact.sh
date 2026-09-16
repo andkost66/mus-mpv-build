@@ -213,6 +213,215 @@ verify_media() {
     done
 }
 
+# Python owns the loopback TLS server and mpv children. Bash tracks the helper
+# so EXIT/INT/TERM can request its finally blocks before deleting WORK_DIR.
+verify_https_ipc() {
+    python3 - "$EXTRACT_DIR" "$REPO_ROOT/fixtures" "$WORK_DIR" "$MPV_VERSION" <<'PYTHON' &
+import contextlib
+import functools
+import http.server
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+
+runtime, fixtures, work = map(Path, sys.argv[1:4])
+version = sys.argv[4]
+os.umask(0o077)
+env = os.environ.copy()
+for key in list(env):
+    if key in ("LD_PRELOAD", "LD_AUDIT") or key.lower().endswith("_proxy"):
+        del env[key]
+env["LD_LIBRARY_PATH"] = str(runtime / "lib")
+mpv = [str(runtime / "bin/mpv"), "--no-config", "--no-video", "--ao=null"]
+
+
+def interrupted(signum, frame):
+    # Repeated signals must not interrupt child reaping / server shutdown.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
+
+
+signal.signal(signal.SIGINT, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
+
+
+@contextlib.contextmanager
+def child(args, **kwargs):
+    process = subprocess.Popen(args, **kwargs)
+    try:
+        yield process
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def verify_https():
+    cert, key = work / "localhost.crt", work / "localhost.key"
+    # Trust only this short-lived certificate for this invocation; never change
+    # system trust or disable TLS verification. The server binds only loopback.
+    with child(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-days", "1", "-subj", "/CN=127.0.0.1",
+                "-addext", "subjectAltName=IP:127.0.0.1",
+                "-keyout", str(key), "-out", str(cert)],
+               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as process:
+        _, errors = process.communicate(timeout=30)
+        require(process.returncode == 0, "Test certificate generation failed: " + errors.decode())
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(fixtures))
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = "https://127.0.0.1:%d/opus.webm" % server.server_port
+            with child(mpv + ["--tls-verify=yes", "--tls-ca-file=" + str(cert),
+                              "--network-timeout=10", url], env=env) as process:
+                require(process.wait(timeout=30) == 0, "Extracted mpv HTTPS playback failed")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+    print("HTTPS: loopback fixture playback with certificate verification passed.", flush=True)
+
+
+def verify_ipc():
+    # Keep the AF_UNIX path short even when the caller has a long TMPDIR.
+    # cwd is private WORK_DIR, and the socket is removed in finally and by Bash.
+    ipc = work / "mpv.sock"
+    try:
+        with child(mpv + ["--idle=yes", "--pause=yes", "--input-terminal=no",
+                          "--input-ipc-server=mpv.sock"], cwd=work, env=env) as process:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                deadline = time.monotonic() + 10
+                while True:
+                    require(process.poll() is None, "IPC mpv exited before opening its socket")
+                    try:
+                        connection.connect("mpv.sock")
+                        break
+                    except (FileNotFoundError, ConnectionRefusedError):
+                        require(time.monotonic() < deadline, "Timed out waiting for IPC socket")
+                        time.sleep(0.05)
+                buffer = b""
+                request_id = 0
+                loaded = False
+
+                def receive(deadline):
+                    nonlocal buffer, loaded
+                    while b"\n" not in buffer:
+                        remaining = deadline - time.monotonic()
+                        require(remaining > 0, "Timed out waiting for IPC response")
+                        connection.settimeout(remaining)
+                        data = connection.recv(65536)
+                        require(data, "IPC closed before the expected response")
+                        buffer += data
+                        require(len(buffer) <= 1024 * 1024, "Oversized IPC response")
+                    line, buffer = buffer.split(b"\n", 1)
+                    response = json.loads(line)
+                    require(isinstance(response, dict), "IPC response must be a JSON object")
+                    if response.get("event") == "file-loaded":
+                        loaded = True
+                    if response.get("event") == "end-file":
+                        require(response.get("reason") != "error", "IPC media loading failed")
+                    return response
+
+                def command(*args):
+                    nonlocal request_id
+                    request_id += 1
+                    connection.settimeout(10)
+                    connection.sendall((json.dumps({"command": args, "request_id": request_id}) + "\n").encode())
+                    deadline = time.monotonic() + 10
+                    while True:
+                        response = receive(deadline)
+                        if response.get("request_id") == request_id:
+                            require(response.get("error") == "success", "IPC command failed: %r: %r" % (args, response))
+                            return response.get("data")
+
+                reported = command("get_property", "mpv-version")
+                require(isinstance(reported, str) and reported.split()[:2] in
+                        (["mpv", version], ["mpv", "v" + version]),
+                        "Unexpected IPC mpv-version: %r" % reported)
+                media = str(fixtures / "opus.webm")
+                command("loadfile", media, "replace")
+                deadline = time.monotonic() + 10
+                while not loaded:
+                    receive(deadline)
+                require(command("get_property", "path") == media, "IPC loaded the wrong file")
+                # Round-trip both boolean values, proving a state change rather
+                # than accepting the startup pause value as evidence of a set.
+                for paused in (False, True):
+                    command("set_property", "pause", paused)
+                    require(command("get_property", "pause") is paused, "IPC pause did not change")
+                command("quit")
+                require(process.wait(timeout=10) == 0, "IPC quit did not exit successfully")
+    finally:
+        if ipc.exists():
+            ipc.unlink()
+    print("IPC: version, loadfile/file-loaded/path, pause round-trips and quit passed.", flush=True)
+
+
+try:
+    os.chdir(work)
+    verify_https()
+    verify_ipc()
+except Exception as error:
+    print("Error: HTTPS/IPC verification failed: %s" % error, file=sys.stderr)
+    sys.exit(1)
+PYTHON
+    BACKGROUND_PID=$!
+    if ! wait "$BACKGROUND_PID"; then
+        fail 'Extracted artifact HTTPS/IPC regression failed.'
+    fi
+    BACKGROUND_PID=''
+}
+
+verify_portability() {
+    local image index=0
+    for image in "${PORTABILITY_IMAGE_LIST[@]}"; do
+        index=$((index + 1))
+        ACTIVE_CONTAINER="mus-verify-${WORK_DIR##*/}-$index"
+        printf 'Portability: %s (%s), extracted artifact and both fixtures.\n' "$image" "$DOCKER_PLATFORM"
+        # No pulls, installs or builds: provision these configured images before
+        # verification. Only the artifact lib/ supplies bundled dependencies;
+        # the base image supplies its system ABI (glibc / loader).
+        timeout --signal=TERM --kill-after=5s 60s docker run --rm --pull=never \
+            --name "$ACTIVE_CONTAINER" --platform "$DOCKER_PLATFORM" \
+            --network=none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --mount "type=bind,src=$EXTRACT_DIR,dst=/artifact,readonly" \
+            --mount "type=bind,src=$REPO_ROOT/fixtures,dst=/fixtures,readonly" \
+            --env LD_LIBRARY_PATH=/artifact/lib --env LD_PRELOAD= --env LD_AUDIT= \
+            --entrypoint /bin/sh "$image" -ec '
+                for fixture in opus.webm aac.m4a; do
+                    /artifact/bin/mpv --no-config --no-video --ao=null "/fixtures/$fixture"
+                done
+            ' &
+        BACKGROUND_PID=$!
+        if ! wait "$BACKGROUND_PID"; then
+            fail "Extracted artifact portability regression failed: $image"
+        fi
+        BACKGROUND_PID=''
+        ACTIVE_CONTAINER=''
+    done
+}
+
 if [[ $# -ne 2 ]]; then
     usage
     fail 'Expected exactly two arguments: target ID and exact archive path.'
@@ -227,7 +436,7 @@ fi
 readonly REQUESTED_TARGET="$1"
 readonly ARCHIVE_ARGUMENT="$2"
 export LC_ALL=C
-for tool in dirname cat sha256sum mktemp rm mkdir tar zstd find realpath od readelf awk sort tail; do
+for tool in dirname cat sha256sum mktemp rm mkdir tar zstd find realpath od readelf awk sort tail python3 openssl docker timeout; do
     command -v "$tool" >/dev/null 2>&1 || fail "Required tool not found: $tool"
 done
 # ldconfig often lives outside an unprivileged user's PATH. -p only reads cache.
@@ -248,14 +457,18 @@ readonly TARGET_CONFIG="$REPO_ROOT/targets/$REQUESTED_TARGET/target.env"
 [[ -f "$TARGET_CONFIG" ]] || fail "Unknown target '$REQUESTED_TARGET': config file not found: $TARGET_CONFIG"
 
 # Require values from the trusted repository config, not inherited environment.
-unset TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV
+unset TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV PORTABILITY_IMAGES DOCKER_PLATFORM
 source "$TARGET_CONFIG" >&2 || fail "Could not load target config: $TARGET_CONFIG"
-for variable in TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV; do
+for variable in TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV PORTABILITY_IMAGES DOCKER_PLATFORM; do
     [[ -n ${!variable:-} ]] || fail "$TARGET_CONFIG must define a non-empty $variable."
 done
 [[ "$TARGET_ID" == "$REQUESTED_TARGET" ]] || fail "Config TARGET_ID '$TARGET_ID' does not match requested target '$REQUESTED_TARGET'."
 [[ "$GLIBC_BASELINE" =~ ^[0-9]+(\.[0-9]+)+$ ]] || fail "Invalid GLIBC_BASELINE '$GLIBC_BASELINE': expected a dotted numeric version."
-readonly TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV
+readonly TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV PORTABILITY_IMAGES DOCKER_PLATFORM
+# Split whitespace without pathname expansion, including multiline lists.
+IFS=$' \t\n' read -r -a PORTABILITY_IMAGE_LIST <<< "${PORTABILITY_IMAGES//$'\n'/ }"
+[[ ${#PORTABILITY_IMAGE_LIST[@]} -gt 0 ]] || fail "$TARGET_CONFIG must list at least one PORTABILITY_IMAGES entry."
+readonly -a PORTABILITY_IMAGE_LIST
 configure_architecture
 
 case "/$SOURCE_ENV/" in
@@ -294,8 +507,21 @@ fi
 
 WORK_DIR="$(mktemp -d)" || fail 'Could not create temporary verification directory.'
 readonly WORK_DIR
+BACKGROUND_PID=''
+ACTIVE_CONTAINER=''
 cleanup() {
+    local status=$?
+    trap '' INT TERM
+    if [[ -n "$BACKGROUND_PID" ]]; then
+        kill -TERM "$BACKGROUND_PID" 2>/dev/null || true
+        wait "$BACKGROUND_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$ACTIVE_CONTAINER" ]]; then
+        timeout --kill-after=5s 15s docker rm --force "$ACTIVE_CONTAINER" >/dev/null 2>&1 ||
+            printf 'Warning: could not remove portability container %s; check Docker.\n' "$ACTIVE_CONTAINER" >&2
+    fi
     rm -rf -- "$WORK_DIR"
+    return "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -409,8 +635,11 @@ done <<< "$host_cache"
 verify_dependencies
 verify_runtime
 verify_media
+verify_https_ipc
+verify_portability
 
-printf 'Day 10 verification passed for %s (including Day 8 archive safety and structure and Day 9 ELF checks).\nArchive: %s\n' "$TARGET_ID" "$ARCHIVE_PATH"
+printf 'Day 11 verification passed for %s (including Day 8 archive safety and structure and Day 9 ELF checks).\nArchive: %s\n' "$TARGET_ID" "$ARCHIVE_PATH"
 printf 'ELF: %s; %s artifact files checked; dependencies resolved statically (artifact lib/ + host cache).\n' "$ARCH" "${#ARTIFACT_ELFS[@]}"
 printf 'Maximum required GLIBC: %s; configured baseline: %s.\n' "${MAX_GLIBC:-none}" "$GLIBC_BASELINE"
 printf 'Runtime: mpv %s; pulse and alsa backends present; opus.webm and aac.m4a passed.\n' "$MPV_VERSION"
+printf 'Day 11: local HTTPS and JSON IPC passed; both fixtures passed in: %s.\n' "$PORTABILITY_IMAGES"
