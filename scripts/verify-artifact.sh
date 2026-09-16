@@ -168,6 +168,51 @@ verify_dependencies() {
     done
 }
 
+run_mpv() (
+    # Replace inherited library paths and prevent injected loader libraries.
+    unset LD_PRELOAD LD_AUDIT
+    LD_LIBRARY_PATH="$EXTRACT_DIR/lib" "$EXTRACT_DIR/bin/mpv" "$@"
+)
+
+verify_runtime() {
+    local version_output audio_outputs backend
+    if ! version_output="$(run_mpv --no-config --version 2>&1)"; then
+        printf '%s\n' "$version_output" >&2
+        fail 'Extracted mpv --version failed.'
+    fi
+    printf '%s\n' "$version_output"
+    if ! awk -v expected="$MPV_VERSION" '
+        $1 == "mpv" && ($2 == expected || $2 == "v" expected) { found = 1 }
+        END { exit !found }
+    ' <<< "$version_output"; then
+        fail "Extracted mpv does not report expected version $MPV_VERSION."
+    fi
+
+    if ! audio_outputs="$(run_mpv --no-config --ao=help 2>&1)"; then
+        printf '%s\n' "$audio_outputs" >&2
+        fail 'Could not list extracted mpv audio backends.'
+    fi
+    for backend in pulse alsa; do
+        if ! awk -v backend="$backend" '
+            $1 == backend { found = 1 }
+            END { exit !found }
+        ' <<< "$audio_outputs"; then
+            printf '%s\n' "$audio_outputs" >&2
+            fail "Extracted mpv is missing the $backend audio backend."
+        fi
+    done
+}
+
+verify_media() {
+    local fixture
+    for fixture in opus.webm aac.m4a; do
+        [[ -f "$REPO_ROOT/fixtures/$fixture" ]] || fail "Media fixture not found: $REPO_ROOT/fixtures/$fixture"
+        if ! run_mpv --no-config --no-video --ao=null "$REPO_ROOT/fixtures/$fixture"; then
+            fail "Extracted mpv media regression failed: $fixture"
+        fi
+    done
+}
+
 if [[ $# -ne 2 ]]; then
     usage
     fail 'Expected exactly two arguments: target ID and exact archive path.'
@@ -203,15 +248,29 @@ readonly TARGET_CONFIG="$REPO_ROOT/targets/$REQUESTED_TARGET/target.env"
 [[ -f "$TARGET_CONFIG" ]] || fail "Unknown target '$REQUESTED_TARGET': config file not found: $TARGET_CONFIG"
 
 # Require values from the trusted repository config, not inherited environment.
-unset TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE
+unset TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV
 source "$TARGET_CONFIG" >&2 || fail "Could not load target config: $TARGET_CONFIG"
-for variable in TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE; do
+for variable in TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV; do
     [[ -n ${!variable:-} ]] || fail "$TARGET_CONFIG must define a non-empty $variable."
 done
 [[ "$TARGET_ID" == "$REQUESTED_TARGET" ]] || fail "Config TARGET_ID '$TARGET_ID' does not match requested target '$REQUESTED_TARGET'."
 [[ "$GLIBC_BASELINE" =~ ^[0-9]+(\.[0-9]+)+$ ]] || fail "Invalid GLIBC_BASELINE '$GLIBC_BASELINE': expected a dotted numeric version."
-readonly TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE
+readonly TARGET_ID ARCH EXPECTED_MACHINE GLIBC_BASELINE SOURCE_ENV
 configure_architecture
+
+case "/$SOURCE_ENV/" in
+    //*|*/../*)
+        fail "SOURCE_ENV must be repository-relative without '..' components: $SOURCE_ENV"
+        ;;
+esac
+[[ -f "$REPO_ROOT/$SOURCE_ENV" ]] || fail "SOURCE_ENV file not found: $REPO_ROOT/$SOURCE_ENV"
+SOURCE_CONFIG="$(realpath -e -- "$REPO_ROOT/$SOURCE_ENV")" || fail "Cannot resolve SOURCE_ENV: $SOURCE_ENV"
+readonly SOURCE_CONFIG
+[[ "$SOURCE_CONFIG" == "$REPO_ROOT/"* ]] || fail 'SOURCE_ENV must resolve inside the repository.'
+unset MPV_VERSION
+source "$SOURCE_CONFIG" >&2 || fail "Could not load source contract: $SOURCE_CONFIG"
+[[ ${MPV_VERSION:-} =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]] || fail "$SOURCE_ENV must define a non-empty, filename-safe MPV_VERSION."
+readonly MPV_VERSION
 
 [[ -f "$ARCHIVE_ARGUMENT" ]] || fail "Archive is not an existing regular file: $ARCHIVE_ARGUMENT"
 ARCHIVE_DIR="$(cd -- "$(dirname -- "$ARCHIVE_ARGUMENT")" && pwd -P)" || fail 'Could not resolve archive directory.'
@@ -348,7 +407,10 @@ while IFS= read -r line; do
     fi
 done <<< "$host_cache"
 verify_dependencies
+verify_runtime
+verify_media
 
-printf 'Day 9 verification passed for %s (including Day 8 archive safety and structure).\nArchive: %s\n' "$TARGET_ID" "$ARCHIVE_PATH"
+printf 'Day 10 verification passed for %s (including Day 8 archive safety and structure and Day 9 ELF checks).\nArchive: %s\n' "$TARGET_ID" "$ARCHIVE_PATH"
 printf 'ELF: %s; %s artifact files checked; dependencies resolved statically (artifact lib/ + host cache).\n' "$ARCH" "${#ARTIFACT_ELFS[@]}"
 printf 'Maximum required GLIBC: %s; configured baseline: %s.\n' "${MAX_GLIBC:-none}" "$GLIBC_BASELINE"
+printf 'Runtime: mpv %s; pulse and alsa backends present; opus.webm and aac.m4a passed.\n' "$MPV_VERSION"
