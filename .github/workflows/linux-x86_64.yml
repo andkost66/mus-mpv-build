@@ -54,3 +54,76 @@ jobs:
 
       - name: Build, package and verify linux-x86_64
         run: ./scripts/build-package-verify.sh linux-x86_64
+
+      - name: Resolve verified archive
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob dotglob
+
+          archives=(out/linux-x86_64/artifacts/*.tar.zst)
+          if [[ ${#archives[@]} -ne 1 ]]; then
+              printf 'Expected exactly one packaged archive.\n' >&2
+              exit 1
+          fi
+          archive="${archives[0]}"
+          for file in "$archive" "$archive.sha256"; do
+              if [[ ! -f "$file" || -L "$file" || ! -s "$file" ]]; then
+                  printf 'Missing or invalid package file: %s\n' "$file" >&2
+                  exit 1
+              fi
+          done
+          printf 'archive=%s\n' "${archive##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified archive and checksum
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            out/linux-x86_64/artifacts/${{ steps.package.outputs.archive }}
+            out/linux-x86_64/artifacts/${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Remove original outputs and prepare clean download
+        id: redownload
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]] || { printf 'Missing uploaded artifact ID.\n' >&2; exit 1; }
+
+          # Includes dist and the original archive/checksum; build scratch space
+          # is already removed by build-target.sh's EXIT trap.
+          rm -rf -- out/linux-x86_64
+          [[ ! -e out/linux-x86_64 && ! -L out/linux-x86_64 ]]
+          download_dir="$(mktemp -d "$RUNNER_TEMP/linux-x86_64-download.XXXXXXXX")"
+          printf 'directory=%s\n' "$download_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Download just-uploaded artifact
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.upload.outputs.artifact-id }}
+          path: ${{ steps.redownload.outputs.directory }}
+
+      - name: Verify downloaded linux-x86_64 archive
+        shell: bash
+        env:
+          DOWNLOAD_DIR: ${{ steps.redownload.outputs.directory }}
+          ARCHIVE_NAME: ${{ steps.package.outputs.archive }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob dotglob
+
+          [[ ! -e out/linux-x86_64 && ! -L out/linux-x86_64 ]]
+          entries=("$DOWNLOAD_DIR/"*)
+          archive="$DOWNLOAD_DIR/$ARCHIVE_NAME"
+          if [[ ${#entries[@]} -ne 2 || ! -f "$archive" || -L "$archive" ||
+                ! -f "$archive.sha256" || -L "$archive.sha256" ]]; then
+              printf 'Expected only the downloaded archive and its matching checksum.\n' >&2
+              exit 1
+          fi
+          ./scripts/verify-artifact.sh linux-x86_64 "$archive"
