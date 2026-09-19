@@ -29,6 +29,9 @@ permissions:
 jobs:
   build-package-verify:
     runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      archive: ${{ steps.package.outputs.archive }}
 
     steps:
       - name: Checkout
@@ -126,4 +129,207 @@ jobs:
               printf 'Expected only the downloaded archive and its matching checksum.\n' >&2
               exit 1
           fi
+          ./scripts/verify-artifact.sh linux-x86_64 "$archive"
+
+  publish-candidate:
+    needs: build-package-verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.candidate.outputs.tag }}
+      archive: ${{ needs.build-package-verify.outputs.archive }}
+
+    steps:
+      - name: Checkout workflow commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve candidate identity and prepare clean download
+        id: candidate
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ needs.build-package-verify.outputs.artifact-id }}
+          ARCHIVE_NAME: ${{ needs.build-package-verify.outputs.archive }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+
+          unset SOURCE_ENV ARTIFACT_TARGET MPV_VERSION
+          source targets/linux-x86_64/target.env
+          source "$SOURCE_ENV"
+          [[ "$MPV_VERSION" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]]
+          [[ "$ARTIFACT_TARGET" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+          short_sha="${GITHUB_SHA:0:12}"
+          tag="mpv-${MPV_VERSION}-rev.${short_sha}"
+          git check-ref-format "refs/tags/$tag"
+          [[ "$ARCHIVE_NAME" == "mpv-${MPV_VERSION}-${ARTIFACT_TARGET}-rev.${short_sha}.tar.zst" ]]
+
+          download_dir="$(mktemp -d "$RUNNER_TEMP/linux-x86_64-candidate.XXXXXXXX")"
+          printf 'tag=%s\ndirectory=%s\n' "$tag" "$download_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Download exact verified Actions artifact
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.build-package-verify.outputs.artifact-id }}
+          path: ${{ steps.candidate.outputs.directory }}
+
+      - name: Validate candidate archive and checksum
+        shell: bash
+        env:
+          DOWNLOAD_DIR: ${{ steps.candidate.outputs.directory }}
+          ARCHIVE_NAME: ${{ needs.build-package-verify.outputs.archive }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob dotglob
+
+          entries=("$DOWNLOAD_DIR/"*)
+          archive="$DOWNLOAD_DIR/$ARCHIVE_NAME"
+          [[ ${#entries[@]} -eq 2 ]] || { printf 'Expected exactly two candidate files.\n' >&2; exit 1; }
+          for file in "$archive" "$archive.sha256"; do
+              [[ -f "$file" && ! -L "$file" && -s "$file" ]] || { printf 'Invalid candidate file: %s\n' "$file" >&2; exit 1; }
+          done
+          # Match the verifier's single-record, exact-basename checksum contract.
+          checksum_record="$(cat -- "$archive.sha256")"
+          [[ "$checksum_record" =~ ^([0-9a-f]{64})\ \  ]]
+          [[ "$checksum_record" == "${BASH_REMATCH[1]}  ${ARCHIVE_NAME}" ]]
+          cd -- "$DOWNLOAD_DIR"
+          printf '%s\n' "$checksum_record" | sha256sum -c --strict -
+
+      - name: Create immutable candidate prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ steps.candidate.outputs.tag }}
+          DOWNLOAD_DIR: ${{ steps.candidate.outputs.directory }}
+          ARCHIVE_NAME: ${{ needs.build-package-verify.outputs.archive }}
+        run: |
+          set -euo pipefail
+          repo="repos/$GITHUB_REPOSITORY"
+
+          # Successful list requests distinguish absence from API/auth failures.
+          # Include drafts and all pages when checking for an existing release.
+          existing_tags="$(gh api --paginate "$repo/git/matching-refs/tags/$CANDIDATE_TAG" |
+              jq -r --arg tag "$CANDIDATE_TAG" '.[] | select(.ref == ("refs/tags/" + $tag)) | .ref')"
+          existing_releases="$(gh api --paginate "$repo/releases" |
+              jq -r --arg tag "$CANDIDATE_TAG" '.[] | select(.tag_name == $tag) | .id')"
+          if [[ -n "$existing_tags" || -n "$existing_releases" ]]; then
+              printf 'Candidate tag or release already exists: %s\n' "$CANDIDATE_TAG" >&2
+              exit 1
+          fi
+
+          # Creating the ref also rejects concurrent publication of this tag.
+          gh api --method POST "$repo/git/refs" \
+              -f "ref=refs/tags/$CANDIDATE_TAG" -f "sha=$GITHUB_SHA" --silent
+
+          # Explicit draft mode keeps partial uploads on failure, without cleanup.
+          # The CLI uploads these assets only to the release it has just created.
+          release_url="$(gh release create "$CANDIDATE_TAG" \
+              "$DOWNLOAD_DIR/$ARCHIVE_NAME" "$DOWNLOAD_DIR/$ARCHIVE_NAME.sha256" \
+              --repo "$GITHUB_REPOSITORY" --verify-tag --target "$GITHUB_SHA" \
+              --draft --prerelease --latest=false \
+              --title "$CANDIDATE_TAG" --notes "Candidate built from $GITHUB_SHA.")"
+          [[ -n "$release_url" ]]
+
+          # Bind publication to the newly created release's returned URL and ID.
+          # List releases because the tag endpoint does not return drafts.
+          for attempt in {1..5}; do
+              release_id="$(gh api --method GET --paginate "$repo/releases" |
+                  jq -rs --arg url "$release_url" --arg tag "$CANDIDATE_TAG" '
+                      [.[][] | select(.html_url == $url and .tag_name == $tag)] |
+                      if length == 1 then .[0].id
+                      elif length == 0 then empty
+                      else error("Multiple releases match the newly created draft") end
+                  ')"
+              if [[ -n "$release_id" ]]; then
+                  break
+              fi
+              if (( attempt == 5 )); then
+                  printf 'Newly created draft Release not visible after 5 attempts: %s\n' "$release_url" >&2
+                  exit 1
+              fi
+              sleep 1
+          done
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          gh api "$repo/releases/$release_id" |
+              jq -e --arg url "$release_url" --arg tag "$CANDIDATE_TAG" --arg archive "$ARCHIVE_NAME" '
+                  .html_url == $url and .tag_name == $tag and .prerelease == true and .draft == true and
+                  ([.assets[].name] | sort) == ([$archive, ($archive + ".sha256")] | sort) and
+                  all(.assets[]; .state == "uploaded" and .size > 0)
+              ' > /dev/null
+
+          # Publish only this verified new draft by ID, without a tag-based lookup.
+          # No replacement or rollback: partial state remains and reruns must fail.
+          gh api --method PATCH "$repo/releases/$release_id" \
+              -F draft=false -F prerelease=true -f make_latest=false --silent
+
+  verify-candidate-release:
+    needs: publish-candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout workflow commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install runner dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends binutils openssl python3 zstd
+
+      - name: Provision portability images
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          unset PORTABILITY_IMAGES DOCKER_PLATFORM
+          source targets/linux-x86_64/target.env
+
+          IFS=$' \t\n' read -r -a portability_images <<< "${PORTABILITY_IMAGES//$'\n'/ }"
+          for image in "${portability_images[@]}"; do
+              docker pull --platform "$DOCKER_PLATFORM" "$image"
+          done
+
+      - name: Download and verify published candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ needs.publish-candidate.outputs.tag }}
+          ARCHIVE_NAME: ${{ needs.publish-candidate.outputs.archive }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob dotglob
+
+          [[ -n "$CANDIDATE_TAG" && "$ARCHIVE_NAME" != */* && "$ARCHIVE_NAME" == *.tar.zst ]]
+          # The candidate ref must still identify the exact workflow commit.
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$CANDIDATE_TAG" |
+              jq -e --arg sha "$GITHUB_SHA" '.object.type == "commit" and .object.sha == $sha' > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$CANDIDATE_TAG" |
+              jq -e --arg tag "$CANDIDATE_TAG" --arg archive "$ARCHIVE_NAME" '
+                  .tag_name == $tag and .prerelease == true and .draft == false and
+                  ([.assets[].name] | sort) == ([$archive, ($archive + ".sha256")] | sort) and
+                  all(.assets[]; .state == "uploaded" and .size > 0)
+              ' > /dev/null
+
+          download_dir="$(mktemp -d "$RUNNER_TEMP/linux-x86_64-release.XXXXXXXX")"
+          gh release download "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$ARCHIVE_NAME" --pattern "$ARCHIVE_NAME.sha256" --dir "$download_dir"
+          entries=("$download_dir/"*)
+          archive="$download_dir/$ARCHIVE_NAME"
+          [[ ${#entries[@]} -eq 2 ]] || { printf 'Expected exactly two release assets.\n' >&2; exit 1; }
+          for file in "$archive" "$archive.sha256"; do
+              [[ -f "$file" && ! -L "$file" && -s "$file" ]] || { printf 'Invalid release asset: %s\n' "$file" >&2; exit 1; }
+          done
+
+          # Level 3: the full verifier starts with strict SHA-256 verification,
+          # then checks the archive, ELF, runtime, media, HTTPS, IPC and portability.
           ./scripts/verify-artifact.sh linux-x86_64 "$archive"
