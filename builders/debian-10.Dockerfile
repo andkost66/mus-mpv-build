@@ -23,7 +23,6 @@ RUN printf '%s\n' \
         autoconf \
         automake \
         libtool \
-        nasm \
         libfreetype6-dev \
         libfribidi-dev \
         libharfbuzz-dev \
@@ -36,6 +35,24 @@ RUN printf '%s\n' \
         libssl-dev \
         libffi-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# The pinned FFmpeg x86 assembly needs NASM 2.15.05 rather than Buster's 2.14.
+RUN set -eu; \
+    build_dir="$(mktemp -d)"; \
+    cd "$build_dir"; \
+    curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 \
+        --output nasm-2.15.05.tar.xz \
+        https://www.nasm.us/pub/nasm/releasebuilds/2.15.05/nasm-2.15.05.tar.xz; \
+    printf '%s  %s\n' \
+        '3caf6729c1073bf96629b57cee31eeb54f4f8129b01902c73428836550b30a3f' \
+        'nasm-2.15.05.tar.xz' | sha256sum --check --strict -; \
+    tar -xJf nasm-2.15.05.tar.xz; \
+    cd nasm-2.15.05; \
+    ./configure --prefix=/usr/local; \
+    make -j"$(nproc)"; \
+    make install; \
+    cd /; \
+    rm -rf "$build_dir"
 
 # Build against Buster's libc, preserving Debian's /usr/bin/python3.
 # ensurepip uses the bootstrap wheels bundled in the verified CPython source.
@@ -78,6 +95,9 @@ RUN sh -lc 'set -eu; \
     test "$(dpkg --print-architecture)" = amd64; \
     test "$(uname -m)" = x86_64; \
     test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"; \
+    test "$(command -v nasm)" = /usr/local/bin/nasm; \
+    nasm_version="$(nasm -v)"; \
+    test "${nasm_version%% compiled on *}" = "NASM version 2.15.05"; \
     test "$(command -v python3)" = /usr/local/bin/python3; \
     test "$(readlink -f "$(command -v python3)")" = /usr/local/bin/python3.11; \
     python3 -c "import sys, ssl, zlib, ctypes; assert sys.version_info[:3] == (3, 11, 14)"; \

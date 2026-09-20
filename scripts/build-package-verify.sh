@@ -17,9 +17,9 @@ if [[ $# -ne 1 ]]; then
 fi
 
 # Match the safe target ID syntax used by build-target.sh.
-if [[ ! $1 =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+if [[ ! $1 =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     usage
-    fail "Invalid target ID '$1'; use lowercase letters, digits, underscores, or hyphens, starting with a letter or digit."
+    fail "Invalid target ID '$1'; use lowercase letters, digits, dots, underscores, or hyphens, starting with a letter or digit."
 fi
 
 readonly REQUESTED_TARGET="$1"

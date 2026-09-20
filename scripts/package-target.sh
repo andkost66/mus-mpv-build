@@ -17,9 +17,9 @@ if [[ $# -ne 1 ]]; then
 fi
 
 # Match the safe target ID syntax used by build-target.sh.
-if [[ ! $1 =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+if [[ ! $1 =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     usage
-    fail "Invalid target ID '$1'; use lowercase letters, digits, underscores, or hyphens, starting with a letter or digit."
+    fail "Invalid target ID '$1'; use lowercase letters, digits, dots, underscores, or hyphens, starting with a letter or digit."
 fi
 
 readonly REQUESTED_TARGET="$1"
@@ -42,7 +42,7 @@ for variable in "${REQUIRED_VARIABLES[@]}"; do
 done
 
 [[ "$TARGET_ID" == "$REQUESTED_TARGET" ]] || fail "Config TARGET_ID '$TARGET_ID' does not match requested target '$REQUESTED_TARGET'."
-[[ "$ARTIFACT_TARGET" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || fail "Invalid ARTIFACT_TARGET: $ARTIFACT_TARGET"
+[[ "$ARTIFACT_TARGET" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || fail "Invalid ARTIFACT_TARGET: $ARTIFACT_TARGET"
 readonly TARGET_ID ARTIFACT_TARGET SOURCE_ENV
 
 case "/$SOURCE_ENV/" in

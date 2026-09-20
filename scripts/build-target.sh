@@ -17,10 +17,10 @@ if [[ $# -ne 1 ]]; then
 fi
 
 # IDs start with a lowercase ASCII letter or digit, followed by those
-# characters, underscores, or hyphens. No path separators or dot segments.
-if [[ ! $1 =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+# characters, dots, underscores, or hyphens. No path separators or dot segments.
+if [[ ! $1 =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
     usage
-    fail "Invalid target ID '$1'; use lowercase letters, digits, underscores, or hyphens, starting with a letter or digit."
+    fail "Invalid target ID '$1'; use lowercase letters, digits, dots, underscores, or hyphens, starting with a letter or digit."
 fi
 
 readonly REQUESTED_TARGET="$1"
@@ -252,6 +252,7 @@ assemble_dist() {
                     libpthread.so.*|\
                     libdl.so.*|\
                     librt.so.*|\
+                    libnsl.so.1|\
                     libresolv.so.*)
                         continue
                         ;;
