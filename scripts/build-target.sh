@@ -28,6 +28,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 readonly REPO_ROOT
+source "$SCRIPT_DIR/system-runtime.sh"
 readonly TARGET_CONFIG="$REPO_ROOT/targets/$REQUESTED_TARGET/target.env"
 
 [[ -f "$TARGET_CONFIG" ]] || fail "Unknown target '$REQUESTED_TARGET': config file not found: $TARGET_CONFIG"
@@ -231,9 +232,12 @@ assemble_dist() {
         -e HOME=/tmp \
         -v "$BUILD_DIR:/work:ro" \
         -v "$DIST_DIR:/dist" \
+        -v "$SCRIPT_DIR/system-runtime.sh:/runtime-contract.sh:ro" \
         "$BUILDER_IMAGE" \
         bash -lc '
             set -euo pipefail
+
+            source /runtime-contract.sh
 
             dependencies=$(ldd /work/mpv/build/mpv)
             if [[ "$dependencies" == *"not found"* ]]; then
@@ -246,17 +250,9 @@ assemble_dist() {
             while read -r lib; do
                 name=$(basename "$lib")
 
-                case "$name" in
-                    libc.so.*|\
-                    libm.so.*|\
-                    libpthread.so.*|\
-                    libdl.so.*|\
-                    librt.so.*|\
-                    libnsl.so.1|\
-                    libresolv.so.*)
-                        continue
-                        ;;
-                esac
+                if system_runtime_name "$name"; then
+                    continue
+                fi
 
                 cp -L "$lib" "/dist/lib/$name"
             done

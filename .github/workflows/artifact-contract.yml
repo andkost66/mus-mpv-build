@@ -1,0 +1,31 @@
+name: Artifact contract regression
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - '.github/workflows/artifact-contract.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - '.github/workflows/artifact-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential binutils openssl python3 zstd zlib1g-dev
+      - name: Run artifact contract tests
+        run: python3 tests/test-artifact-contract.py
