@@ -37,6 +37,14 @@ readonly TARGET_CONFIG="$REPO_ROOT/targets/$REQUESTED_TARGET/target.env"
 # Assign before readonly so a packaging failure retains its exit status.
 ARCHIVE_PATH="$("$SCRIPT_DIR/package-target.sh" "$REQUESTED_TARGET")"
 readonly ARCHIVE_PATH
+cleanup_failed_package() {
+    local status=$?
+    if (( status != 0 )); then
+        rm -f -- "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256"
+    fi
+    return "$status"
+}
+trap cleanup_failed_package EXIT
 
 "$SCRIPT_DIR/verify-artifact.sh" "$REQUESTED_TARGET" "$ARCHIVE_PATH"
 

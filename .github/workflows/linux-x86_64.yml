@@ -164,7 +164,7 @@ jobs:
           source targets/linux-x86_64/target.env
           source "$SOURCE_ENV"
           [[ "$MPV_VERSION" =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]]
-          [[ "$ARTIFACT_TARGET" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+          [[ "$ARTIFACT_TARGET" =~ ^[a-z0-9][a-z0-9._-]*$ ]]
           short_sha="${GITHUB_SHA:0:12}"
           tag="mpv-${MPV_VERSION}-rev.${short_sha}"
           git check-ref-format "refs/tags/$tag"

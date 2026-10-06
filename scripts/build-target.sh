@@ -75,6 +75,8 @@ for variable in BUILDER_DOCKERFILE SOURCE_ENV BUILD_PROFILE; do
 done
 
 readonly OUTPUT_DIR="$REPO_ROOT/out/$REQUESTED_TARGET"
+[[ ! -L "$REPO_ROOT/out" ]] || fail "Output root must not be a symlink: $REPO_ROOT/out"
+[[ ! -L "$OUTPUT_DIR" ]] || fail "Target output directory must not be a symlink: $OUTPUT_DIR"
 mkdir -p -- "$OUTPUT_DIR"
 
 printf 'Target config validated: %s\nOutput directory: %s\n' "$REQUESTED_TARGET" "$OUTPUT_DIR"
