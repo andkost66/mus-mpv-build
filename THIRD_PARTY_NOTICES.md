@@ -1,17 +1,20 @@
 # Third-party notices
 
 The MIT License in [LICENSE](LICENSE) applies only to material authored for
-this repository, including its build scripts, CI workflows, Dockerfile,
+this repository, including its build scripts, CI workflows, Dockerfiles,
 configuration files, and documentation, unless otherwise stated.
 
 It does not relicense third-party software downloaded, built, linked, or
 redistributed by this project. Each third-party component remains subject to
 its own license terms.
 
-## Direct build inputs
+## Runtime components built from source
 
-The exact revisions used by the current build are recorded in
-[`linux-x86_64/source.env`](linux-x86_64/source.env).
+The revisions of the runtime components below and of `mpv-build`, the
+build-time orchestration input, are recorded in
+[`build-config/source.env`](build-config/source.env). Builder-only tools,
+including NASM, Python and Meson, are installed or configured in the
+Dockerfiles and are not runtime artifact components.
 
 | Component | License used by the current build | Source and license information |
 | --- | --- | --- |
@@ -27,9 +30,9 @@ not enable FFmpeg's GPL or nonfree modes.
 ## Other shared libraries
 
 Release archives may also contain dynamically linked shared libraries copied
-from the Debian 11 build environment. Those libraries remain under their own
-licenses. The table above covers the components built directly by this
-repository and is not an exhaustive inventory of system-provided libraries.
+from the selected target's Debian build environment. Those libraries remain
+under their own licenses. The table above covers runtime components built from
+source and is not an exhaustive inventory of system-provided libraries.
 
 The revision links above provide traceability, but do not replace any source
 code, attribution, or license-text obligations that apply when redistributing
